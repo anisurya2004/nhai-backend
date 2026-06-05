@@ -1,31 +1,20 @@
-import psycopg2
+import os
+import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
 
 app = FastAPI()
 
-# --- Database Configuration (from Supabase) ---
-DB_HOST = 'db.gobefnqrcgiylupnatbb.supabase.co'
-DB_PORT = 5432
-DB_USER = 'postgres'
-DB_PASSWORD = 'johnguthrie@@4Sub'  # Replace with your actual Supabase password
-DB_NAME = 'postgres'
+# --- Supabase Configuration ---
+SUPABASE_URL = os.getenv('SUPABASE_URL', 'https://db.gobefnqrcgiylupnatbb.supabase.co')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY', 'sb_publishable_BysUEbg2r5bI_7cTPaR45w_Uw8Bxxhb')
 
-def get_db_connection():
-    try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            database=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            sslmode='require'
-        )
-        return conn
-    except Exception as e:
-        print(f"Database error: {e}")
-        raise HTTPException(status_code=500, detail="Database connection failed")
+HEADERS = {
+    'apikey': SUPABASE_KEY,
+    'Authorization': f'Bearer {SUPABASE_KEY}',
+    'Content-Type': 'application/json'
+}
 
 # --- Request Models (Auto-Validates JSON) ---
 class LoginRequest(BaseModel):
@@ -46,104 +35,105 @@ class Record(BaseModel):
 class SyncRequest(BaseModel):
     records: List[Record]
 
-# --- API Endpoints ---
-
 @app.get("/")
 def home():
     return {"message": "Server is running!"}
 
 @app.post("/ping")
 def ping():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    # Using your exact version check query
-    cur.execute('SELECT version();')
-    db_version = cur.fetchone()[0]
-    
-    cur.close()
-    conn.close()
-    
-    return {
-        "message": "Database connection successful!",
-        "postgres_version": db_version
-    }
+    try:
+        response = requests.get(
+            f'{SUPABASE_URL}/rest/v1/employees?limit=1',
+            headers=HEADERS,
+            timeout=5
+        )
+        if response.status_code == 200:
+            return {"message": "Database connection successful!"}
+        else:
+            raise HTTPException(status_code=500, detail="Database error")
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail="Database connection failed")
 
 @app.post("/register")
 def register(request: RegisterRequest):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
     try:
-        # Check if user already exists
-        cur.execute("SELECT emp_id FROM employees WHERE emp_id = %s", (request.emp_id,))
-        if cur.fetchone():
-            raise HTTPException(status_code=400, detail="Employee ID already exists")
-
-        # Convert embedding list to string for pgvector insertion
-        embedding_str = '[' + ','.join(map(str, request.face_embedding)) + ']'
-        
-        cur.execute(
-            "INSERT INTO employees (emp_id, name, password, face_embedding) VALUES (%s, %s, %s, %s)",
-            (request.emp_id, request.name, request.password, embedding_str)
+        # Check if user exists
+        response = requests.get(
+            f'{SUPABASE_URL}/rest/v1/employees?emp_id=eq.{request.emp_id}',
+            headers=HEADERS
         )
-        conn.commit()
-        return {"message": "Registration successful"}
+        if response.json():
+            raise HTTPException(status_code=400, detail="Employee ID already exists")
+        
+        # Insert new employee
+        response = requests.post(
+            f'{SUPABASE_URL}/rest/v1/employees',
+            headers=HEADERS,
+            json={
+                'emp_id': request.emp_id,
+                'name': request.name,
+                'password': request.password,
+                'face_embedding': request.face_embedding
+            }
+        )
+        
+        if response.status_code == 201:
+            return {"message": "Registration successful"}
+        else:
+            raise HTTPException(status_code=500, detail=f"Registration failed: {response.text}")
     except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Database insertion failed: {str(e)}")
-    finally:
-        cur.close()
-        conn.close()
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
 @app.post("/login")
 def login(request: LoginRequest):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    cur.execute(
-        "SELECT face_embedding FROM employees WHERE emp_id = %s AND password = %s",
-        (request.emp_id, request.password)
-    )
-    result = cur.fetchone()
-    
-    if not result:
-        cur.close()
-        conn.close()
-        raise HTTPException(status_code=401, detail="Invalid Credentials")
-
-    # Fetch the last action for this user
-    cur.execute(
-        "SELECT action_type FROM attendance WHERE emp_id = %s ORDER BY timestamp DESC LIMIT 1",
-        (request.emp_id,)
-    )
-    last_action_row = cur.fetchone()
-    last_action = last_action_row[0] if last_action_row else None
-    
-    cur.close()
-    conn.close()
-
-    return {
-        "face_embedding": result[0],
-        "last_action": last_action
-    }
+    try:
+        # Get employee by ID and password
+        response = requests.get(
+            f'{SUPABASE_URL}/rest/v1/employees?emp_id=eq.{request.emp_id}&password=eq.{request.password}',
+            headers=HEADERS
+        )
+        
+        data = response.json()
+        if not data:
+            raise HTTPException(status_code=401, detail="Invalid Credentials")
+        
+        emp_data = data[0]
+        
+        # Get last action
+        response = requests.get(
+            f'{SUPABASE_URL}/rest/v1/attendance?emp_id=eq.{request.emp_id}&order=timestamp.desc&limit=1',
+            headers=HEADERS
+        )
+        
+        last_action = None
+        attendance_data = response.json()
+        if attendance_data:
+            last_action = attendance_data[0]['action_type']
+        
+        return {
+            "face_embedding": emp_data['face_embedding'],
+            "last_action": last_action
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/sync")
 def sync(request: SyncRequest):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
     try:
         for record in request.records:
-            cur.execute(
-                "INSERT INTO attendance (emp_id, timestamp, action_type) VALUES (%s, %s, %s)",
-                (record.emp_id, record.timestamp, record.action_type)
+            response = requests.post(
+                f'{SUPABASE_URL}/rest/v1/attendance',
+                headers=HEADERS,
+                json={
+                    'emp_id': record.emp_id,
+                    'timestamp': record.timestamp,
+                    'action_type': record.action_type
+                }
             )
-        conn.commit() # Save the changes to the database
+            if response.status_code not in [200, 201]:
+                raise Exception(f"Failed to insert record: {response.text}")
+        
         return {"message": "Successfully synced"}
     except Exception as e:
-        conn.rollback() # Undo the changes if something crashes
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cur.close()
-        conn.close()
