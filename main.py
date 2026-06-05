@@ -7,7 +7,7 @@ from typing import List
 app = FastAPI()
 
 # --- Supabase Configuration ---
-SUPABASE_URL = os.getenv('SUPABASE_URL', 'https://db.gobefnqrcgiylupnatbb.supabase.co')
+SUPABASE_URL = os.getenv('SUPABASE_URL', 'https://gobefnqrcgiylupnatbb.supabase.co')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY', 'sb_publishable_BysUEbg2r5bI_7cTPaR45w_Uw8Bxxhb')
 
 HEADERS = {
